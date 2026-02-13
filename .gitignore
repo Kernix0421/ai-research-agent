@@ -1,0 +1,55 @@
+# ======================
+# 敏感配置
+# ======================
+.env
+
+# ======================
+# 向量数据库 & 检索索引（绝不上传！）
+# ======================
+faiss_index/
+my_db/
+vectorstore/
+*.faiss
+*.pkl
+bm25_data.pkl
+page_info.pkl
+
+# ======================
+# 日志 & 聊天历史（含你的提问记录！）
+# ======================
+logs/
+*.json
+full_chat_history.json
+history_log.json
+history_records.json
+research_agents_log.json
+structured_agents_log.json
+unstructured_agents_log.json
+
+# ======================
+# 模型缓存（体积巨大，且含本地路径）
+# ======================
+hf_cache/
+ollama_models/
+models/
+
+# ======================
+# Python 缓存
+# ======================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ======================
+# IDE 配置（可选）
+# ======================
+.idea/
+.vscode/
+
+# ======================
+# 系统文件
+# ======================
+.DS_Store
+Thumbs.db
+desktop.ini
