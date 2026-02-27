@@ -79,11 +79,79 @@ class ResearchAgent:
     def __init__(self, retriever):
         self.retriever = retriever
 
-    def work(self, query):
+    def work(self, query, max_context_length=2000):
         print("🔍 [资料员] 检索中...")
-        docs = self.retriever.invoke(query)
-        context = "\n\n".join([f"【来源:{os.path.basename(d.metadata['source'])}】\n{d.page_content}" for d in docs])
+        
+        # 查询扩展
+        expanded_query = self._expand_query(query)
+        print(f"📝 扩展查询: {expanded_query}")
+        
+        # 使用扩展后的查询进行检索
+        docs = self.retriever.invoke(expanded_query)
+        
+        # 处理文档，提取关键信息并压缩
+        processed_docs = []
+        total_length = 0
+        
+        for d in docs:
+            # 提取关键信息
+            content = self._extract_key_info(d.page_content)
+            # 压缩文档内容
+            compressed_content = self._compress_document(content, max_length=500)
+            doc_str = f"【来源:{os.path.basename(d.metadata['source'])}】\n{compressed_content}"
+            
+            # 控制总长度
+            if total_length + len(doc_str) < max_context_length:
+                processed_docs.append(doc_str)
+                total_length += len(doc_str)
+            else:
+                break
+        
+        context = "\n\n".join(processed_docs)
         return context, docs
+    
+    def _expand_query(self, query):
+        """查询扩展"""
+        # 简单的查询扩展：添加同义词和相关术语
+        synonyms = {
+            "轨道交通": ["地铁", "轻轨", "高铁", "铁路"],
+            "人工智能": ["AI", "机器学习", "深度学习"],
+            "优化": ["改进", "提升", "增强"],
+            "模型": ["算法", "方法", "技术"],
+            "研究": ["调研", "分析", "探索"]
+        }
+        
+        expanded_terms = [query]
+        
+        # 提取关键词并添加同义词
+        for term, syns in synonyms.items():
+            if term in query:
+                expanded_terms.extend(syns)
+        
+        # 去重并组合
+        unique_terms = list(set(expanded_terms))
+        return " ".join(unique_terms)
+    
+    def _extract_key_info(self, content):
+        """提取关键信息"""
+        # 简单的关键信息提取：保留标题和段落首句
+        lines = content.split('\n')
+        key_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            if line and (line.startswith('#') or line.endswith('。') or line.endswith('!') or line.endswith('?')):
+                key_lines.append(line)
+        
+        return '\n'.join(key_lines[:10])  # 最多保留10行关键信息
+    
+    def _compress_document(self, content, max_length=500):
+        """压缩文档内容"""
+        if len(content) <= max_length:
+            return content
+        # 简单压缩：保留开头和结尾，中间用省略号
+        half = (max_length - 3) // 2
+        return content[:half] + "..." + content[-half:]
 
 
 class WritingAgent:
@@ -93,13 +161,12 @@ class WritingAgent:
         self.llm = llm
         self.max_tokens = max_tokens
 
-    def work(self, query, context, history, task_type):
+    def work(self, query, context, task_type):
         print(f"✍️ [写手] 撰写中 (限额:{self.max_tokens})...")
 
         mode_str = "科研问答" if task_type == "1" else "项目申请辅助"
         prompt = f"""你是一名{mode_str}专家。请基于证据回答，严禁幻觉。
 
-【历史记忆】：{history}
 【事实证据】：{context}
 【当前问题】：{query}
 
@@ -127,13 +194,17 @@ class EvaluatorAgent:
 【模型回答】：{draft}
 
 请严格按以下 JSON 格式输出结果（不要包含其他文字）：
-{{
+{
   "accuracy": 0-100,      // 回答与证据的契合度
   "precision": 0-100,     // 回答中有效信息占比
   "recall": 0-100,        // 证据中关键点被采纳的比例
   "hallucination": 0-100, // 幻觉率（证据中未提及内容的比例）
+  "relevance": 0-100,     // 回答与查询的相关性
+  "completeness": 0-100,  // 回答的完整性
+  "innovation": 0-100,    // 回答的创新性
+  "clarity": 0-100,       // 回答的清晰度
   "reason": "简短的量化分析理由"
-}}
+}
 """
         # 强制使用 JSON 模式
         response = self.llm.bind(max_tokens=500).invoke(prompt)
@@ -144,17 +215,112 @@ class EvaluatorAgent:
             return res
         except:
             # 保底方案
-            return {"accuracy": 0, "precision": 0, "recall": 0, "hallucination": 0, "reason": "解析失败"}
+            return {
+                "accuracy": 0, "precision": 0, "recall": 0, "hallucination": 0,
+                "relevance": 0, "completeness": 0, "innovation": 0, "clarity": 0,
+                "reason": "解析失败"
+            }
 
 
-# --- [4. 调度中心 (Orchestrator)] ---
+# --- [4. 记忆管理系统] ---
+
+class MemoryManager:
+    """分层记忆管理器"""
+    
+    def __init__(self, embedding_model):
+        self.short_term_memory = []  # 最近对话，最多保存10轮
+        self.long_term_memory = []  # 重要信息，带向量嵌入
+        self.embedding_model = embedding_model
+        self._embedding_cache = {}  # 嵌入缓存，避免重复计算
+    
+    def _get_embedding(self, text):
+        """获取文本嵌入，使用缓存"""
+        if text not in self._embedding_cache:
+            self._embedding_cache[text] = self.embedding_model.embed_query(text)
+        return self._embedding_cache[text]
+    
+    def add_short_term(self, query, response):
+        """添加短期记忆"""
+        self.short_term_memory.append({"query": query, "response": response, "timestamp": time.time()})
+        # 保持最近10轮对话
+        if len(self.short_term_memory) > 10:
+            self.short_term_memory = self.short_term_memory[-10:]
+    
+    def add_long_term(self, key, content, importance=0.8):
+        """添加长期记忆"""
+        # 压缩内容，保持在合理长度
+        compressed_content = self._compress_content(content, max_length=800)
+        embedding = self._get_embedding(compressed_content)
+        self.long_term_memory.append({
+            "key": key,
+            "content": compressed_content,
+            "importance": importance,
+            "embedding": embedding,
+            "timestamp": time.time()
+        })
+    
+    def get_relevant_memory(self, query, k=3, max_length=1000):
+        """获取与查询相关的记忆"""
+        if not self.long_term_memory:
+            return ""
+        
+        # 计算查询向量
+        query_embedding = self._get_embedding(query)
+        
+        # 计算相似度
+        import numpy as np
+        similarities = []
+        for memory in self.long_term_memory:
+            similarity = np.dot(query_embedding, memory["embedding"]) / (
+                        np.linalg.norm(query_embedding) * np.linalg.norm(memory["embedding"]))
+            # 结合重要性和相似度
+            combined_score = similarity * 0.7 + memory["importance"] * 0.3
+            similarities.append((combined_score, memory))
+        
+        # 按相似度排序，取前k个
+        similarities.sort(reverse=True)
+        relevant_memories = [m[1] for m in similarities[:k]]
+        
+        # 格式化并压缩返回
+        memory_str = "\n\n".join([f"【记忆:{m['key']}】\n{m['content']}" for m in relevant_memories])
+        return self._compress_content(memory_str, max_length)
+    
+    def get_short_term_summary(self, max_length=500):
+        """获取短期记忆摘要"""
+        if not self.short_term_memory:
+            return ""
+        
+        # 生成摘要
+        summary = "最近对话摘要：\n"
+        for i, item in enumerate(reversed(self.short_term_memory)):
+            summary += f"Q{i+1}: {item['query'][:50]}...\nA{i+1}: {item['response'][:50]}...\n"
+        return self._compress_content(summary, max_length)
+    
+    def _compress_content(self, content, max_length=500):
+        """压缩内容到指定长度"""
+        if len(content) <= max_length:
+            return content
+        # 简单压缩：保留开头和结尾，中间用省略号
+        half = (max_length - 3) // 2
+        return content[:half] + "..." + content[-half:]
+
+# --- [5. 调度中心 (Orchestrator)] ---
 
 class ResearchOrchestrator:
     def __init__(self):
-        self.logger = HistoryLogger(LOG_FILE)
-        self.retriever = self._init_retriever()
-        self.researcher = ResearchAgent(self.retriever)
-        self.chat_memory = ""  # 简单记忆
+        try:
+            self.logger = HistoryLogger(LOG_FILE)
+            self.retriever = self._init_retriever()
+            self.researcher = ResearchAgent(self.retriever)
+            self.embedding_model = HuggingFaceEmbeddings(model_name="BAAI/bge-m3", model_kwargs={'device': 'cpu'})
+            self.memory_manager = MemoryManager(self.embedding_model)
+            print("✅ 系统初始化成功")
+        except Exception as e:
+            print(f"❌ 系统初始化失败: {e}")
+            # 初始化失败时的降级处理
+            self.logger = HistoryLogger(LOG_FILE)
+            self.researcher = None
+            self.memory_manager = None
 
     def _init_retriever(self):
         print("⌛ [初始化] 加载 Embedding 与索引...")
@@ -162,41 +328,91 @@ class ResearchOrchestrator:
         vs = FAISS.load_local(DB_PATH, emb, allow_dangerous_deserialization=True)
         with open(BM25_PATH, "rb") as f: bm25_data = pickle.load(f)
         bm25 = BM25Retriever.from_documents(bm25_data)
-        bm25.k = 4
-        return EnsembleRetriever(retrievers=[vs.as_retriever(search_kwargs={"k": 7}), bm25], weights=[0.7, 0.3])
+        
+        # 优化参数
+        bm25.k = 5  # 增加BM25检索结果数量
+        vector_retriever = vs.as_retriever(search_kwargs={"k": 8})  # 增加向量检索结果数量
+        
+        # 调整权重，增加BM25的权重以提高关键词匹配效果
+        return EnsembleRetriever(retrievers=[vector_retriever, bm25], weights=[0.6, 0.4])
 
     def execute(self, query, task_type, model_choice, t_limit):
-        # 模型分配：写手(DeepSeek逻辑强), 评估员(Qwen指令强)
-        writer_llm = deepseek if model_choice == "3" else qwen
-        eval_llm = qwen
+        try:
+            # 模型分配：写手(DeepSeek逻辑强), 评估员(Qwen指令强)
+            writer_llm = deepseek if model_choice == "3" else qwen
+            eval_llm = qwen
 
-        writer = WritingAgent(writer_llm, max_tokens=t_limit)
-        evaluator = EvaluatorAgent(eval_llm)
+            writer = WritingAgent(writer_llm, max_tokens=t_limit)
+            evaluator = EvaluatorAgent(eval_llm)
 
-        start_time = time.time()
+            start_time = time.time()
 
-        # 1. 检索
-        context, raw_docs = self.researcher.work(query)
+            # 1. 检索相关记忆
+            memory_context = ""
+            if self.memory_manager:
+                try:
+                    relevant_memory = self.memory_manager.get_relevant_memory(query, max_length=800)
+                    short_term_summary = self.memory_manager.get_short_term_summary(max_length=400)
+                    memory_context = f"{short_term_summary}\n\n{relevant_memory}"
+                except Exception as e:
+                    print(f"⚠️ 记忆检索失败: {e}")
 
-        # 2. 写作
-        draft, is_truncated = writer.work(query, context, self.chat_memory, task_type)
-        if is_truncated: draft = "⚠️(内容因长度截断)\n" + draft
+            # 2. 检索文档
+            context = ""
+            if self.researcher:
+                try:
+                    context, raw_docs = self.researcher.work(query, max_context_length=1500)
+                except Exception as e:
+                    print(f"⚠️ 文档检索失败: {e}")
+            else:
+                context = "系统检索功能暂时不可用"
+            
+            full_context = f"{memory_context}\n\n{context}"
 
-        # 3. 评估
-        score, feedback = evaluator.work(query, draft, context)
+            # 3. 写作
+            draft = ""
+            is_truncated = False
+            try:
+                draft, is_truncated = writer.work(query, full_context, task_type)
+                if is_truncated: draft = "⚠️(内容因长度截断)\n" + draft
+            except Exception as e:
+                draft = f"⚠️ 内容生成失败: {e}\n请稍后重试"
 
-        # 4. 存入记忆与日志
-        duration = f"{time.time() - start_time:.2f}s"
-        self.chat_memory = f"Q:{query} A:{draft[:100]}..."  # 记忆压缩
+            # 4. 评估
+            score = 0
+            feedback = "评估失败"
+            try:
+                eval_result = evaluator.work(query, draft, full_context)
+                score = eval_result.get('accuracy', 0)
+                feedback = eval_result.get('reason', '评估失败')
+            except Exception as e:
+                print(f"⚠️ 评估失败: {e}")
 
-        log_data = {
-            "query": query, "score": score, "duration": duration,
-            "model": "DeepSeek-V3" if model_choice == "3" else "Qwen-Plus",
-            "is_truncated": is_truncated
-        }
-        self.logger.log(log_data)
+            # 5. 更新记忆
+            if self.memory_manager:
+                try:
+                    self.memory_manager.add_short_term(query, draft)
+                    # 对于重要的内容，添加到长期记忆
+                    if score > 80:
+                        self.memory_manager.add_long_term(f"重要知识点_{int(time.time())}", draft[:500])
+                except Exception as e:
+                    print(f"⚠️ 记忆更新失败: {e}")
 
-        return draft, feedback, score, duration
+            # 6. 存入日志
+            duration = f"{time.time() - start_time:.2f}s"
+
+            log_data = {
+                "query": query, "score": score, "duration": duration,
+                "model": "DeepSeek-V3" if model_choice == "3" else "Qwen-Plus",
+                "is_truncated": is_truncated
+            }
+            self.logger.log(log_data)
+
+            return draft, feedback, score, duration
+        except Exception as e:
+            print(f"❌ 执行失败: {e}")
+            # 降级处理
+            return f"⚠️ 系统执行失败: {e}\n请稍后重试", "系统错误", 0, "0.00s"
 
 
 # --- [5. 交互界面] ---
