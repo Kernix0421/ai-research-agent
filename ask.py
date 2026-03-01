@@ -7,6 +7,7 @@ import json
 import pickle
 from datetime import datetime
 from models import qwen, deepseek
+import streamlit as st
 
 # --- [1. 环境配置] ---
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -20,21 +21,46 @@ from langchain_community.retrievers import BM25Retriever
 
 # 彻底放弃自动搜索，手动尝试所有可能的物理路径
 import langchain
+EnsembleRetriever = None
 try:
-    # 路径 1: 现代版本标准路径
-    from langchain.retrievers.ensemble_retriever import EnsembleRetriever
+    # 路径 1: 现代版本标准路径 (LangChain 1.x) - langchain_classic
+    from langchain_classic.retrievers import EnsembleRetriever
+    print("✅ 成功导入 EnsembleRetriever from langchain_classic.retrievers")
 except ImportError:
     try:
-        # 路径 2: 某些 0.3.x 的变体路径
-        from langchain.retrievers import EnsembleRetriever
+        # 路径 2: 现代版本标准路径 (LangChain 1.x) - langchain_community
+        from langchain_community.retrievers import EnsembleRetriever
+        print("✅ 成功导入 EnsembleRetriever from langchain_community.retrievers")
     except ImportError:
         try:
-            # 路径 3: 强制从模块根目录导入
-            import importlib
-            mod = importlib.import_module("langchain.retrievers.ensemble_retriever")
-            EnsembleRetriever = mod.EnsembleRetriever
-        except Exception as e:
-            st.error(f"严重错误：无法定位检索组件。请检查安装。错误信息: {e}")
+            # 路径 3: 旧版本路径
+            from langchain.retrievers import EnsembleRetriever
+            print("✅ 成功导入 EnsembleRetriever from langchain.retrievers")
+        except ImportError:
+            try:
+                # 路径 4: 另一种可能的路径
+                from langchain.retrievers.ensemble_retriever import EnsembleRetriever
+                print("✅ 成功导入 EnsembleRetriever from langchain.retrievers.ensemble_retriever")
+            except ImportError:
+                try:
+                    # 路径 5: 强制从模块根目录导入
+                    import importlib
+                    try:
+                        mod = importlib.import_module("langchain_classic.retrievers")
+                        EnsembleRetriever = mod.EnsembleRetriever
+                        print("✅ 成功导入 EnsembleRetriever from langchain_classic.retrievers via importlib")
+                    except:
+                        try:
+                            mod = importlib.import_module("langchain_community.retrievers")
+                            EnsembleRetriever = mod.EnsembleRetriever
+                            print("✅ 成功导入 EnsembleRetriever from langchain_community.retrievers via importlib")
+                        except:
+                            mod = importlib.import_module("langchain.retrievers.ensemble_retriever")
+                            EnsembleRetriever = mod.EnsembleRetriever
+                            print("✅ 成功导入 EnsembleRetriever from langchain.retrievers.ensemble_retriever via importlib")
+                except Exception as e:
+                    print(f"⚠️ 无法定位检索组件: {e}")
+                    print("⚠️ 系统将以降级模式运行，检索功能暂时不可用")
 
 # 确保其他检索组件也正常
 from langchain_community.vectorstores import FAISS
@@ -87,27 +113,40 @@ class ResearchAgent:
         print(f"📝 扩展查询: {expanded_query}")
         
         # 使用扩展后的查询进行检索
-        docs = self.retriever.invoke(expanded_query)
+        try:
+            docs = self.retriever.invoke(expanded_query)
+        except Exception as e:
+            print(f"⚠️ 检索失败: {e}")
+            # 返回空结果
+            return "系统检索功能暂时不可用", []
         
         # 处理文档，提取关键信息并压缩
         processed_docs = []
         total_length = 0
         
         for d in docs:
-            # 提取关键信息
-            content = self._extract_key_info(d.page_content)
-            # 压缩文档内容
-            compressed_content = self._compress_document(content, max_length=500)
-            doc_str = f"【来源:{os.path.basename(d.metadata['source'])}】\n{compressed_content}"
-            
-            # 控制总长度
-            if total_length + len(doc_str) < max_context_length:
-                processed_docs.append(doc_str)
-                total_length += len(doc_str)
-            else:
-                break
+            try:
+                # 提取关键信息
+                content = self._extract_key_info(d.page_content)
+                # 压缩文档内容
+                compressed_content = self._compress_document(content, max_length=500)
+                # 安全获取来源信息
+                source = d.metadata.get('source', '未知来源')
+                doc_str = f"【来源:{os.path.basename(source)}】\n{compressed_content}"
+                
+                # 控制总长度
+                if total_length + len(doc_str) < max_context_length:
+                    processed_docs.append(doc_str)
+                    total_length += len(doc_str)
+                else:
+                    break
+            except Exception as e:
+                print(f"⚠️ 处理文档失败: {e}")
+                continue
         
         context = "\n\n".join(processed_docs)
+        if not context:
+            context = "系统检索功能暂时不可用"
         return context, docs
     
     def _expand_query(self, query):
@@ -194,7 +233,7 @@ class EvaluatorAgent:
 【模型回答】：{draft}
 
 请严格按以下 JSON 格式输出结果（不要包含其他文字）：
-{
+{{
   "accuracy": 0-100,      // 回答与证据的契合度
   "precision": 0-100,     // 回答中有效信息占比
   "recall": 0-100,        // 证据中关键点被采纳的比例
@@ -204,7 +243,7 @@ class EvaluatorAgent:
   "innovation": 0-100,    // 回答的创新性
   "clarity": 0-100,       // 回答的清晰度
   "reason": "简短的量化分析理由"
-}
+}}
 """
         # 强制使用 JSON 模式
         response = self.llm.bind(max_tokens=500).invoke(prompt)
@@ -311,9 +350,23 @@ class ResearchOrchestrator:
         try:
             self.logger = HistoryLogger(LOG_FILE)
             self.retriever = self._init_retriever()
-            self.researcher = ResearchAgent(self.retriever)
-            self.embedding_model = HuggingFaceEmbeddings(model_name="BAAI/bge-m3", model_kwargs={'device': 'cpu'})
-            self.memory_manager = MemoryManager(self.embedding_model)
+            
+            # 只有当retriever成功初始化时才创建ResearchAgent
+            if self.retriever:
+                self.researcher = ResearchAgent(self.retriever)
+            else:
+                self.researcher = None
+                print("⚠️ 检索功能暂时不可用")
+            
+            # 尝试初始化记忆管理系统
+            try:
+                from langchain_huggingface import HuggingFaceEmbeddings
+                self.embedding_model = HuggingFaceEmbeddings(model_name="BAAI/bge-m3", model_kwargs={'device': 'cpu'})
+                self.memory_manager = MemoryManager(self.embedding_model)
+            except Exception as e:
+                print(f"⚠️ 记忆管理系统初始化失败: {e}")
+                self.memory_manager = None
+            
             print("✅ 系统初始化成功")
         except Exception as e:
             print(f"❌ 系统初始化失败: {e}")
@@ -324,17 +377,65 @@ class ResearchOrchestrator:
 
     def _init_retriever(self):
         print("⌛ [初始化] 加载 Embedding 与索引...")
-        emb = HuggingFaceEmbeddings(model_name="BAAI/bge-m3", model_kwargs={'device': 'cpu'})
-        vs = FAISS.load_local(DB_PATH, emb, allow_dangerous_deserialization=True)
-        with open(BM25_PATH, "rb") as f: bm25_data = pickle.load(f)
-        bm25 = BM25Retriever.from_documents(bm25_data)
-        
-        # 优化参数
-        bm25.k = 5  # 增加BM25检索结果数量
-        vector_retriever = vs.as_retriever(search_kwargs={"k": 8})  # 增加向量检索结果数量
-        
-        # 调整权重，增加BM25的权重以提高关键词匹配效果
-        return EnsembleRetriever(retrievers=[vector_retriever, bm25], weights=[0.6, 0.4])
+        try:
+            # 检查EnsembleRetriever是否可用
+            if EnsembleRetriever is None:
+                print("⚠️ EnsembleRetriever 不可用")
+                # 尝试直接使用BM25
+                try:
+                    with open(BM25_PATH, "rb") as f: 
+                        bm25_data = pickle.load(f)
+                    bm25 = BM25Retriever.from_documents(bm25_data)
+                    bm25.k = 10
+                    print("✅ 成功初始化BM25检索器")
+                    return bm25
+                except Exception as e:
+                    print(f"⚠️ 无法初始化BM25检索器: {e}")
+                    return None
+            
+            # 尝试加载BM25数据
+            try:
+                with open(BM25_PATH, "rb") as f: 
+                    bm25_data = pickle.load(f)
+                bm25 = BM25Retriever.from_documents(bm25_data)
+                print("✅ 成功初始化BM25检索器")
+            except Exception as e:
+                print(f"⚠️ 无法初始化BM25检索器: {e}")
+                return None
+            
+            # 尝试初始化嵌入模型和FAISS索引
+            try:
+                from langchain_huggingface import HuggingFaceEmbeddings
+                # 尝试使用本地嵌入模型
+                emb = HuggingFaceEmbeddings(
+                    model_name="sentence-transformers/all-MiniLM-L6-v2",
+                    model_kwargs={"device": "cpu"}
+                )
+                print("✅ 成功初始化嵌入模型")
+                
+                # 尝试加载FAISS索引
+                vs = FAISS.load_local(DB_PATH, emb, allow_dangerous_deserialization=True)
+                print("✅ 成功加载FAISS索引")
+                
+                # 优化参数
+                bm25.k = 5  # 增加BM25检索结果数量
+                vector_retriever = vs.as_retriever(search_kwargs={"k": 8})  # 增加向量检索结果数量
+                
+                # 调整权重，增加BM25的权重以提高关键词匹配效果
+                retriever = EnsembleRetriever(retrievers=[vector_retriever, bm25], weights=[0.6, 0.4])
+                print("✅ 成功初始化EnsembleRetriever")
+                return retriever
+            except Exception as e:
+                print(f"⚠️ 无法初始化FAISS检索器: {e}")
+                print("⚠️ 仅使用BM25检索器")
+                # 仅使用BM25
+                bm25.k = 10
+                return bm25
+        except Exception as e:
+            print(f"⚠️ 检索器初始化失败: {e}")
+            print("⚠️ 系统将以降级模式运行，检索功能暂时不可用")
+            # 返回None，让系统以降级模式运行
+            return None
 
     def execute(self, query, task_type, model_choice, t_limit):
         try:

@@ -12,13 +12,13 @@ from ask import ResearchOrchestrator, WritingAgent, EvaluatorAgent
 
 
 # --- 1. 基础配置与路径 ---
-st.set_page_config(page_title="轨道交通科研助手 V2.2", page_icon="🔬", layout="wide")
+st.set_page_config(page_title="轨道交通科研助手 V2.3", page_icon="🔬", layout="wide")
 CHAT_HISTORY_DB = os.getenv("CHAT_HISTORY_PATH", "./logs/full_chat_history.json")
 LOG_PATH = os.getenv("RESEARCH_LOG_PATH", "./logs/research_agents_log.json")
 
 # --- 2. 持久化逻辑函数 ---
 def save_history_to_disk(messages):
-    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    os.makedirs(os.path.dirname(CHAT_HISTORY_DB), exist_ok=True)
 
     with open(CHAT_HISTORY_DB, "w", encoding="utf-8") as f:
         json.dump(messages, f, ensure_ascii=False, indent=2)
@@ -94,7 +94,7 @@ with st.sidebar:
     st.subheader("🧠 记忆管理")
     
     # 查看长期记忆
-    if hasattr(boss, 'memory_manager') and boss.memory_manager.long_term_memory:
+    if hasattr(boss, 'memory_manager') and boss.memory_manager is not None and boss.memory_manager.long_term_memory:
         st.write(f"长期记忆条数: {len(boss.memory_manager.long_term_memory)}")
         
         # 显示最近的记忆
@@ -122,7 +122,7 @@ with st.sidebar:
             st.caption("日志暂不可用")
 
 # --- 6. 主交互界面 ---
-st.title("🔬 轨道交通科研增强系统 (Agentic V2.2)")
+st.title("🔬 轨道交通科研增强系统 (Agentic V2.3)")
 st.info("系统已就绪。所有对话将实时保存，您可以随时关闭并重新打开。")
 
 # 渲染历史气泡
@@ -144,7 +144,7 @@ if query := st.chat_input("输入科研问题..."):
         try:
             # A. 检索相关记忆
             memory_context = ""
-            if hasattr(boss, 'memory_manager') and boss.memory_manager:
+            if hasattr(boss, 'memory_manager') and boss.memory_manager is not None:
                 status.write("🧠 记忆检索：正在获取相关历史知识...")
                 try:
                     relevant_memory = boss.memory_manager.get_relevant_memory(query, max_length=800)
@@ -188,7 +188,7 @@ if query := st.chat_input("输入科研问题..."):
                 eval_res = {"accuracy": 0, "precision": 0, "recall": 0, "hallucination": 0, "reason": "评估失败"}
 
             # E. 更新记忆
-            if hasattr(boss, 'memory_manager') and boss.memory_manager:
+            if hasattr(boss, 'memory_manager') and boss.memory_manager is not None:
                 try:
                     boss.memory_manager.add_short_term(query, draft)
                     # 对于高评分内容，添加到长期记忆
